@@ -1,0 +1,95 @@
+package com.boogeyman.app
+
+import android.app.*
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.media.projection.MediaProjection
+import android.os.IBinder
+import org.json.JSONObject
+import org.webrtc.*
+
+class ShareService : Service() {
+    companion object { var onPeer: ((Boolean) -> Unit)? = null }
+    private var sig: Signaling? = null
+    private var pc: PeerConnection? = null
+    private var capturer: ScreenCapturerAndroid? = null
+    private var helper: SurfaceTextureHelper? = null
+    private var track: VideoTrack? = null
+    private var dc: DataChannel? = null
+
+    override fun onBind(i: Intent?): IBinder? = null
+
+    override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+        if (i == null || i.action == "stop") { stopSelf(); return START_NOT_STICKY }
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel("bm", "BOOGEYMAN", NotificationManager.IMPORTANCE_LOW))
+        val n = Notification.Builder(this, "bm").setContentTitle("BOOGEYMAN")
+            .setContentText("Screen sharing is on").setSmallIcon(android.R.drawable.ic_media_play).build()
+        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+
+        Rtc.init(this)
+        @Suppress("DEPRECATION")
+        val data = i.getParcelableExtra<Intent>("data")!!
+        val room = i.getStringExtra("room")!!
+        val url = i.getStringExtra("url")!!
+        startCapture(data)
+        sig = Signaling("$url/?room=$room&role=host") { onSignal(it) }.also { it.connect() }
+        return START_NOT_STICKY
+    }
+
+    private fun startCapture(data: Intent) {
+        val dm = resources.displayMetrics
+        val s = 720f / minOf(dm.widthPixels, dm.heightPixels)
+        val w = (dm.widthPixels * s).toInt() / 2 * 2
+        val h = (dm.heightPixels * s).toInt() / 2 * 2
+        capturer = ScreenCapturerAndroid(data, object : MediaProjection.Callback() {
+            override fun onStop() { stopSelf() }
+        })
+        helper = SurfaceTextureHelper.create("cap", Rtc.egl.eglBaseContext)
+        val src = Rtc.factory.createVideoSource(true)
+        capturer!!.initialize(helper, this, src.capturerObserver)
+        capturer!!.startCapture(w, h, 30)
+        track = Rtc.factory.createVideoTrack("v0", src)
+    }
+
+    private fun onSignal(m: JSONObject) {
+        when (m.getString("type")) {
+            "peer-joined" -> { startOffer(); onPeer?.invoke(true) }
+            "answer" -> pc?.setRemoteDescription(SimpleSdp(),
+                SessionDescription(SessionDescription.Type.ANSWER, m.getString("sdp")))
+            "ice" -> pc?.addIceCandidate(iceFrom(m))
+            "peer-left" -> { pc?.close(); pc = null; onPeer?.invoke(false) }
+        }
+    }
+
+    private fun startOffer() {
+        pc?.close()
+        val p = Rtc.factory.createPeerConnection(Rtc.config(), object : PcObserver() {
+            override fun onIceCandidate(c: IceCandidate?) { c?.let { sig?.send(iceMsg(it)) } }
+        })!!
+        p.addTrack(track, listOf("s"))
+        val ch = p.createDataChannel("ctl", DataChannel.Init())
+        ch.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(l: Long) {}
+            override fun onStateChange() {}
+            override fun onMessage(b: DataChannel.Buffer) {
+                val bytes = ByteArray(b.data.remaining()); b.data.get(bytes)
+                ControlService.instance?.handle(JSONObject(String(bytes)))
+            }
+        })
+        dc = ch
+        p.createOffer(object : SimpleSdp() {
+            override fun onCreateSuccess(d: SessionDescription?) {
+                p.setLocalDescription(SimpleSdp(), d)
+                sig?.send(JSONObject().put("type", "offer").put("sdp", d!!.description))
+            }
+        }, MediaConstraints())
+        pc = p
+    }
+
+    override fun onDestroy() {
+        try { capturer?.stopCapture() } catch (_: Exception) {}
+        capturer?.dispose(); pc?.close(); sig?.close(); helper?.dispose()
+        super.onDestroy()
+    }
+}
