@@ -25,7 +25,7 @@ class ViewerActivity : AppCompatActivity() {
         super.onCreate(b)
         Rtc.init(this)
         val parts = intent.getStringExtra("qr")!!.split("|")
-        val url = parts[0]; val room = parts[1]
+        val hostPort = parts[0]; val room = parts[1]
 
         holder = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         renderer = SurfaceViewRenderer(this)
@@ -77,7 +77,12 @@ class ViewerActivity : AppCompatActivity() {
             true
         }
 
-        sig = Signaling("$url/?room=$room&role=viewer") { onSignal(it) }.also { it.connect() }
+        sig = Signaling("ws://$hostPort/?room=$room", { onSignal(it) }, { err ->
+            runOnUiThread {
+                if (err != null) Toast.makeText(this, "Could not connect. Are both phones on the same Wi-Fi / hotspot?", Toast.LENGTH_LONG).show()
+                finish()
+            }
+        }).also { it.connect() }
     }
 
     private fun fit(w: Int, h: Int) {

@@ -17,6 +17,8 @@ import com.google.zxing.BarcodeFormat
 import com.journeyapps.barcodescanner.BarcodeEncoder
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.util.UUID
 
 val RED = Color.parseColor("#E50914")
@@ -27,13 +29,25 @@ fun redBtn(c: Context, t: String, f: () -> Unit) = Button(c).apply {
     setOnClickListener { f() }
 }
 
+// This phone's address on the current Wi-Fi / hotspot network
+fun localIp(): String? {
+    val found = mutableListOf<Pair<String, String>>()
+    for (nif in NetworkInterface.getNetworkInterfaces()) {
+        if (!nif.isUp || nif.isLoopback) continue
+        for (a in nif.inetAddresses) {
+            if (a is Inet4Address && a.isSiteLocalAddress) found.add(nif.name to a.hostAddress!!)
+        }
+    }
+    return (found.firstOrNull { it.first.startsWith("wlan") || it.first.startsWith("ap") } ?: found.firstOrNull())?.second
+}
+
 class MainActivity : AppCompatActivity() {
-    private lateinit var urlEdit: EditText
     private lateinit var home: LinearLayout
     private lateinit var shareBox: LinearLayout
     private lateinit var qrImage: ImageView
     private lateinit var status: TextView
     private lateinit var touchSwitch: Switch
+    private var pendingIp: String? = null
 
     private val projLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         val d = r.data
@@ -47,9 +61,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-        val prefs = getSharedPreferences("bm", Context.MODE_PRIVATE)
         val dp = resources.displayMetrics.density
-        fun saveUrl() = prefs.edit().putString("url", urlEdit.text.toString().trim()).apply()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
@@ -60,28 +72,26 @@ class MainActivity : AppCompatActivity() {
             text = "BOOGEYMAN"; textSize = 32f; setTextColor(RED); gravity = Gravity.CENTER
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         })
-        urlEdit = EditText(this).apply {
-            hint = "Server address"; setTextColor(Color.WHITE); setHintTextColor(Color.DKGRAY)
-            backgroundTintList = ColorStateList.valueOf(RED)
-            setText(prefs.getString("url", "ws://192.168.1.100:8080"))
-        }
-        root.addView(urlEdit)
 
-        // ---- home: two big buttons ----
         home = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val lp = { LinearLayout.LayoutParams(-1, (90 * dp).toInt()).apply { topMargin = (20 * dp).toInt() } }
         home.addView(redBtn(this, "▦   Show my QR") {
-            saveUrl()
-            projLauncher.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
+            val ip = localIp()
+            if (ip == null) {
+                Toast.makeText(this, "Connect to Wi-Fi or turn on Hotspot first", Toast.LENGTH_LONG).show()
+            } else {
+                pendingIp = ip
+                projLauncher.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
+            }
         }, lp())
         home.addView(redBtn(this, "📷   Scan QR") {
-            saveUrl()
             scanLauncher.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setBeepEnabled(false).setOrientationLocked(false).setPrompt("Scan the QR on the other phone"))
+                .setBeepEnabled(false).setOrientationLocked(true)
+                .setCaptureActivity(PortraitCaptureActivity::class.java)
+                .setPrompt("Scan the QR on the other phone"))
         }, lp())
         root.addView(home)
 
-        // ---- sharing: QR + status + touch switch ----
         shareBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; visibility = View.GONE
         }
@@ -116,7 +126,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startShare(data: Intent) {
-        val url = urlEdit.text.toString().trim().trimEnd('/')
+        val ip = pendingIp ?: localIp() ?: return
         val room = UUID.randomUUID().toString().take(8)
         ShareService.onPeer = { connected ->
             runOnUiThread {
@@ -125,8 +135,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
         startForegroundService(Intent(this, ShareService::class.java)
-            .putExtra("data", data).putExtra("room", room).putExtra("url", url))
-        qrImage.setImageBitmap(BarcodeEncoder().encodeBitmap("$url|$room", BarcodeFormat.QR_CODE, 700, 700))
+            .putExtra("data", data).putExtra("room", room))
+        qrImage.setImageBitmap(BarcodeEncoder().encodeBitmap("$ip:${ShareService.PORT}|$room", BarcodeFormat.QR_CODE, 700, 700))
         qrImage.visibility = View.VISIBLE
         status.text = "Scan this QR from the other phone"
         home.visibility = View.GONE; shareBox.visibility = View.VISIBLE

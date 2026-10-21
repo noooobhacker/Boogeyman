@@ -5,12 +5,34 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.os.IBinder
+import org.java_websocket.WebSocket
+import org.java_websocket.handshake.ClientHandshake
+import org.java_websocket.server.WebSocketServer
 import org.json.JSONObject
 import org.webrtc.*
+import java.net.InetSocketAddress
+
+// Tiny signaling server that runs on the sharing phone itself (no PC / no internet server needed)
+class LocalServer(private val room: String, private val onMsg: (JSONObject) -> Unit,
+                  private val onPeer: (Boolean) -> Unit) : WebSocketServer(InetSocketAddress(ShareService.PORT)) {
+    private var client: WebSocket? = null
+    override fun onOpen(c: WebSocket, h: ClientHandshake) {
+        if (!h.resourceDescriptor.contains("room=$room") || client != null) { c.close(); return }
+        client = c; onPeer(true)
+    }
+    override fun onClose(c: WebSocket, code: Int, reason: String?, remote: Boolean) {
+        if (c == client) { client = null; onPeer(false) }
+    }
+    override fun onMessage(c: WebSocket, msg: String) { if (c == client) onMsg(JSONObject(msg)) }
+    override fun onError(c: WebSocket?, e: Exception?) {}
+    override fun onStart() {}
+    fun sendMsg(o: JSONObject) { client?.send(o.toString()) }
+}
 
 class ShareService : Service() {
-    companion object { var onPeer: ((Boolean) -> Unit)? = null }
-    private var sig: Signaling? = null
+    companion object { var onPeer: ((Boolean) -> Unit)? = null; const val PORT = 8765 }
+
+    private var server: LocalServer? = null
     private var pc: PeerConnection? = null
     private var capturer: ScreenCapturerAndroid? = null
     private var helper: SurfaceTextureHelper? = null
@@ -31,9 +53,11 @@ class ShareService : Service() {
         @Suppress("DEPRECATION")
         val data = i.getParcelableExtra<Intent>("data")!!
         val room = i.getStringExtra("room")!!
-        val url = i.getStringExtra("url")!!
         startCapture(data)
-        sig = Signaling("$url/?room=$room&role=host") { onSignal(it) }.also { it.connect() }
+        server = LocalServer(room, { onSignal(it) }, { connected ->
+            if (connected) startOffer() else { pc?.close(); pc = null }
+            onPeer?.invoke(connected)
+        }).also { it.setReuseAddr(true); it.start() }
         return START_NOT_STICKY
     }
 
@@ -54,18 +78,16 @@ class ShareService : Service() {
 
     private fun onSignal(m: JSONObject) {
         when (m.getString("type")) {
-            "peer-joined" -> { startOffer(); onPeer?.invoke(true) }
             "answer" -> pc?.setRemoteDescription(SimpleSdp(),
                 SessionDescription(SessionDescription.Type.ANSWER, m.getString("sdp")))
             "ice" -> pc?.addIceCandidate(iceFrom(m))
-            "peer-left" -> { pc?.close(); pc = null; onPeer?.invoke(false) }
         }
     }
 
     private fun startOffer() {
         pc?.close()
         val p = Rtc.factory.createPeerConnection(Rtc.config(), object : PcObserver() {
-            override fun onIceCandidate(c: IceCandidate?) { c?.let { sig?.send(iceMsg(it)) } }
+            override fun onIceCandidate(c: IceCandidate?) { c?.let { server?.sendMsg(iceMsg(it)) } }
         })!!
         p.addTrack(track, listOf("s"))
         val ch = p.createDataChannel("ctl", DataChannel.Init())
@@ -81,7 +103,7 @@ class ShareService : Service() {
         p.createOffer(object : SimpleSdp() {
             override fun onCreateSuccess(d: SessionDescription?) {
                 p.setLocalDescription(SimpleSdp(), d)
-                sig?.send(JSONObject().put("type", "offer").put("sdp", d!!.description))
+                server?.sendMsg(JSONObject().put("type", "offer").put("sdp", d!!.description))
             }
         }, MediaConstraints())
         pc = p
@@ -89,7 +111,8 @@ class ShareService : Service() {
 
     override fun onDestroy() {
         try { capturer?.stopCapture() } catch (_: Exception) {}
-        capturer?.dispose(); pc?.close(); sig?.close(); helper?.dispose()
+        capturer?.dispose(); pc?.close(); helper?.dispose()
+        try { server?.stop(500) } catch (_: Exception) {}
         super.onDestroy()
     }
 }

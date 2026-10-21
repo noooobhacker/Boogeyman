@@ -50,11 +50,14 @@ fun iceMsg(c: IceCandidate) = JSONObject().put("type", "ice")
 
 fun iceFrom(m: JSONObject) = IceCandidate(m.getString("mid"), m.getInt("idx"), m.getString("cand"))
 
-class Signaling(private val url: String, private val onMsg: (JSONObject) -> Unit) {
+class Signaling(private val url: String, private val onMsg: (JSONObject) -> Unit,
+                private val onEnd: (String?) -> Unit = {}) {
     private var ws: WebSocket? = null
     fun connect() {
         ws = OkHttpClient().newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
             override fun onMessage(webSocket: WebSocket, text: String) { onMsg(JSONObject(text)) }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { onEnd(null) }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { onEnd(t.message ?: "error") }
         })
     }
     fun send(o: JSONObject) { ws?.send(o.toString()) }

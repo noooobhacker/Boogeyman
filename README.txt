@@ -1,5 +1,5 @@
 BOOGEYMAN (com.boogey.man) - Developer: Sham Shyam
-Build steps
+Build steps (no server needed: both phones on the same Wi-Fi or one phone hotspot)
 1. Server (a PC on the same Wi-Fi, or any public server):
    cd server && npm install && node server.js
 2. Open this folder in Android Studio, let Gradle sync, press Run (or Build > Build APK). Install on both phones.
