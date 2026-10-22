@@ -15,10 +15,11 @@ import java.nio.ByteBuffer
 
 // Tiny signaling server that runs on the sharing phone itself (no PC / no internet server needed)
 class LocalServer(private val room: String, private val onMsg: (JSONObject) -> Unit,
-                  private val onPeer: (Boolean) -> Unit) : WebSocketServer(InetSocketAddress(ShareService.PORT)) {
+                  private val onPeer: (Boolean) -> Unit, private val onInfo: (String) -> Unit,
+                  private val accept: () -> Boolean = { true }) : WebSocketServer(InetSocketAddress(ShareService.PORT)) {
     private var client: WebSocket? = null
     override fun onOpen(c: WebSocket, h: ClientHandshake) {
-        if (!h.resourceDescriptor.contains("room=$room")) { c.close(); return }
+        if (!h.resourceDescriptor.contains("room=$room") || !accept()) { c.close(); return }
         val old = client
         client = c
         old?.close()   // a new scan replaces a stale connection
@@ -28,15 +29,20 @@ class LocalServer(private val room: String, private val onMsg: (JSONObject) -> U
         if (c == client) { client = null; onPeer(false) }
     }
     override fun onMessage(c: WebSocket, msg: String) { if (c == client) onMsg(JSONObject(msg)) }
-    override fun onError(c: WebSocket?, e: Exception?) {}
-    override fun onStart() {}
+    override fun onError(c: WebSocket?, e: Exception?) { if (c == null) onInfo("error: " + (e?.message ?: e.toString())) }
+    override fun onStart() { onInfo("ready") }
     fun sendMsg(o: JSONObject) { client?.send(o.toString()) }
 }
 
 class ShareService : Service() {
-    companion object { var onPeer: ((Boolean) -> Unit)? = null; const val PORT = 8765 }
+    companion object {
+        var onPeer: ((Boolean) -> Unit)? = null
+        var onError: ((String) -> Unit)? = null
+        var onInfo: ((String) -> Unit)? = null
+        const val PORT = 8765
+    }
 
-    private var server: LocalServer? = null
+    private var link: Link? = null
     private var pc: PeerConnection? = null
     private var capturer: ScreenCapturerAndroid? = null
     private var helper: SurfaceTextureHelper? = null
@@ -48,6 +54,11 @@ class ShareService : Service() {
 
     override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
         if (i == null || i.action == "stop") { stopSelf(); return START_NOT_STICKY }
+        try { begin(i) } catch (e: Throwable) { onError?.invoke(e.message ?: e.toString()); stopSelf() }
+        return START_NOT_STICKY
+    }
+
+    private fun begin(i: Intent) {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel("bm", "BOOGEYMAN", NotificationManager.IMPORTANCE_LOW))
         val n = Notification.Builder(this, "bm").setContentTitle("BOOGEYMAN")
@@ -59,11 +70,14 @@ class ShareService : Service() {
         val data = i.getParcelableExtra<Intent>("data")!!
         val room = i.getStringExtra("room")!!
         startCapture(data)
-        server = LocalServer(room, { onSignal(it) }, { connected ->
-            if (connected) startOffer() else { pc?.close(); pc = null }
-            onPeer?.invoke(connected)
-        }).also { it.setReuseAddr(true); it.start() }
-        return START_NOT_STICKY
+        link = Link(room, { onSignal(it) },
+            { startOffer(); onPeer?.invoke(true) },
+            { pc?.close(); pc = null; onPeer?.invoke(false) },
+            { info -> onInfo?.invoke(info) }).also {
+            it.listen()
+            // If the viewer phone is the hotspot, it may not be able to call us: we call it (its address = our gateway)
+            gatewayIp(this)?.let { gw -> it.dial(listOf("$gw:$PORT"), 5000) }
+        }
     }
 
     private fun startCapture(data: Intent) {
@@ -94,7 +108,7 @@ class ShareService : Service() {
         pc?.close()
         iceQ.reset()
         val p = Rtc.factory.createPeerConnection(Rtc.config(), object : PcObserver() {
-            override fun onIceCandidate(c: IceCandidate?) { c?.let { server?.sendMsg(iceMsg(it)) } }
+            override fun onIceCandidate(c: IceCandidate?) { c?.let { link?.send(iceMsg(it)) } }
         })!!
         p.addTrack(track, listOf("s"))?.let { sender ->
             try {
@@ -120,7 +134,7 @@ class ShareService : Service() {
         p.createOffer(object : SimpleSdp() {
             override fun onCreateSuccess(d: SessionDescription?) {
                 p.setLocalDescription(SimpleSdp(), d)
-                server?.sendMsg(JSONObject().put("type", "offer").put("sdp", d!!.description))
+                link?.send(JSONObject().put("type", "offer").put("sdp", d!!.description))
             }
         }, MediaConstraints())
         pc = p
@@ -129,7 +143,7 @@ class ShareService : Service() {
     override fun onDestroy() {
         try { capturer?.stopCapture() } catch (_: Exception) {}
         capturer?.dispose(); pc?.close(); helper?.dispose()
-        try { server?.stop(500) } catch (_: Exception) {}
+        link?.close()
         super.onDestroy()
     }
 }

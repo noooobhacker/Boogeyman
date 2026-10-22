@@ -60,10 +60,12 @@ fun iceMsg(c: IceCandidate) = JSONObject().put("type", "ice")
 fun iceFrom(m: JSONObject) = IceCandidate(m.getString("mid"), m.getInt("idx"), m.getString("cand"))
 
 class Signaling(private val url: String, private val onMsg: (JSONObject) -> Unit,
-                private val onEnd: (String?) -> Unit = {}) {
+                private val onEnd: (String?) -> Unit = {}, private val onOpened: () -> Unit = {}) {
     private var ws: WebSocket? = null
     fun connect() {
-        ws = OkHttpClient().newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
+        val client = OkHttpClient.Builder().connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS).build()
+        ws = client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) { onOpened() }
             override fun onMessage(webSocket: WebSocket, text: String) { onMsg(JSONObject(text)) }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { onEnd(null) }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { onEnd(t.message ?: "error") }
@@ -71,4 +73,88 @@ class Signaling(private val url: String, private val onMsg: (JSONObject) -> Unit
     }
     fun send(o: JSONObject) { ws?.send(o.toString()) }
     fun close() { ws?.close(1000, null) }
+}
+
+// Address of the Wi-Fi gateway (when this phone is connected to another phone's hotspot, that is the hotspot phone)
+@Suppress("DEPRECATION")
+fun gatewayIp(ctx: Context): String? = try {
+    val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+    val g = wm.dhcpInfo.gateway
+    if (g == 0) null else "${g and 0xff}.${(g shr 8) and 0xff}.${(g shr 16) and 0xff}.${(g shr 24) and 0xff}"
+} catch (e: Exception) { null }
+
+// One signaling channel between the two phones. Either phone can open it (dial) or accept it (listen),
+// so it works whichever phone is the hotspot.
+class Link(private val room: String, private val onMsg: (JSONObject) -> Unit,
+           private val onUp: () -> Unit, private val onDown: () -> Unit,
+           private val onInfo: (String) -> Unit = {}) {
+    private val lock = Any()
+    private var server: LocalServer? = null
+    private var out: Signaling? = null
+    private var kind = ""            // "", "server" (they called us) or "client" (we called them)
+    @Volatile private var closed = false
+
+    fun isUp(): Boolean = synchronized(lock) { kind != "" }
+
+    fun listen() {
+        server = LocalServer(room, { onMsg(it) }, { connected ->
+            if (connected) {
+                synchronized(lock) { kind = "server" }
+                onUp()
+            } else {
+                var was = false
+                synchronized(lock) { if (kind == "server") { kind = ""; was = true } }
+                if (was) onDown()
+            }
+        }, { onInfo(it) }, { synchronized(lock) { kind != "client" } }).also { it.setReuseAddr(true); it.start() }
+    }
+
+    fun dial(hosts: List<String>, delayMs: Long) {
+        if (hosts.isEmpty()) return
+        Thread {
+            val start = System.currentTimeMillis()
+            while (!closed) {
+                if (!isUp() && System.currentTimeMillis() - start >= delayMs) {
+                    for (h in hosts) {
+                        if (closed || isUp()) break
+                        tryOne(h)
+                    }
+                }
+                try { Thread.sleep(1500) } catch (_: InterruptedException) {}
+            }
+        }.also { it.isDaemon = true }.start()
+    }
+
+    private fun tryOne(host: String) {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val ref = arrayOfNulls<Signaling>(1)
+        val s = Signaling("ws://$host/?room=$room", { onMsg(it) }, { _ ->
+            latch.countDown()
+            var was = false
+            synchronized(lock) { if (kind == "client" && out === ref[0]) { kind = ""; out = null; was = true } }
+            if (was) onDown()
+        }, {
+            var ok = false
+            synchronized(lock) { if (kind == "") { kind = "client"; out = ref[0]; ok = true } }
+            if (ok) onUp() else ref[0]?.close()
+            latch.countDown()
+        })
+        ref[0] = s
+        s.connect()
+        latch.await(6, java.util.concurrent.TimeUnit.SECONDS)
+        synchronized(lock) { if (out !== s) s.close() }
+    }
+
+    fun send(o: JSONObject) {
+        var k = ""
+        var s: Signaling? = null
+        synchronized(lock) { k = kind; s = out }
+        if (k == "server") server?.sendMsg(o) else if (k == "client") s?.send(o)
+    }
+
+    fun close() {
+        closed = true
+        try { server?.stop(300) } catch (_: Exception) {}
+        synchronized(lock) { out?.close(); out = null }
+    }
 }

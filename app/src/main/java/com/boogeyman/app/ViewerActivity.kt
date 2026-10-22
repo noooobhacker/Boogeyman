@@ -18,12 +18,15 @@ import java.nio.ByteBuffer
 class ViewerActivity : AppCompatActivity() {
     private lateinit var renderer: SurfaceViewRenderer
     private lateinit var holder: FrameLayout
-    private var sig: Signaling? = null
+    private var sig: Link? = null
     private var pc: PeerConnection? = null
     private var dc: DataChannel? = null
     private val iceQ = IceQueue()
     private lateinit var info: TextView
     private var vw = 0
+    private var hosts = listOf<String>()
+    private var room = ""
+    private var opened = false
     private var vh = 0
 
     @SuppressLint("ClickableViewAccessibility")
@@ -36,7 +39,7 @@ class ViewerActivity : AppCompatActivity() {
             override fun handleOnBackPressed() { send(JSONObject().put("t", "nav").put("a", "back")) }
         })
         val parts = intent.getStringExtra("qr")!!.split("|")
-        val hostPort = parts[0]; val room = parts[1]
+        hosts = parts[0].split(","); room = parts[1]
 
         holder = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         renderer = SurfaceViewRenderer(this)
@@ -96,12 +99,21 @@ class ViewerActivity : AppCompatActivity() {
             true
         }
 
-        sig = Signaling("ws://$hostPort/?room=$room", { onSignal(it) }, { err ->
-            runOnUiThread {
-                if (err != null) Toast.makeText(this, "Could not connect. Are both phones on the same Wi-Fi / hotspot?", Toast.LENGTH_LONG).show()
+        sig = Link(room, { onSignal(it) }, {
+            opened = true
+            runOnUiThread { info.visibility = View.VISIBLE; info.text = "Connected, waiting for video…" }
+        }, {
+            runOnUiThread { finish() }
+        }).also {
+            it.listen()          // the sharing phone may call us (when we are the hotspot)
+            it.dial(hosts, 0)    // we call the sharing phone
+        }
+        holder.postDelayed({
+            if (!opened && !isFinishing) {
+                Toast.makeText(this, "Could not connect. Same Wi-Fi / hotspot? Try again.", Toast.LENGTH_LONG).show()
                 finish()
             }
-        }).also { it.connect() }
+        }, 30000)
     }
 
     private fun fit(w: Int, h: Int) {
@@ -120,6 +132,7 @@ class ViewerActivity : AppCompatActivity() {
     private fun onSignal(m: JSONObject) {
         when (m.getString("type")) {
             "offer" -> {
+                pc?.close(); iceQ.reset()
                 val p = Rtc.factory.createPeerConnection(Rtc.config(), object : PcObserver() {
                     override fun onIceCandidate(c: IceCandidate?) { c?.let { sig?.send(iceMsg(it)) } }
                     override fun onDataChannel(d: DataChannel?) {

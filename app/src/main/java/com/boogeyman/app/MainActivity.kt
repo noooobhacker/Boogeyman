@@ -27,16 +27,17 @@ fun redBtn(c: Context, t: String, f: () -> Unit) = Button(c).apply {
     setOnClickListener { f() }
 }
 
-// This phone's address on the current Wi-Fi / hotspot network
-fun localIp(): String? {
+// This phone's addresses on the current Wi-Fi / hotspot networks (Wi-Fi/hotspot first)
+fun localIps(): List<String> {
     val found = mutableListOf<Pair<String, String>>()
-    for (nif in NetworkInterface.getNetworkInterfaces()) {
+    for (nif in NetworkInterface.getNetworkInterfaces()?.toList() ?: return emptyList()) {
         if (!nif.isUp || nif.isLoopback) continue
         for (a in nif.inetAddresses) {
             if (a is Inet4Address && a.isSiteLocalAddress) found.add(nif.name to a.hostAddress!!)
         }
     }
-    return (found.firstOrNull { it.first.startsWith("wlan") || it.first.startsWith("ap") } ?: found.firstOrNull())?.second
+    return found.sortedBy { if (it.first.startsWith("wlan") || it.first.startsWith("ap") || it.first.startsWith("swlan")) 0 else 1 }
+        .map { it.second }.distinct()
 }
 
 class MainActivity : AppCompatActivity() {
@@ -45,7 +46,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var qrImage: ImageView
     private lateinit var status: TextView
     private lateinit var touchSwitch: Switch
-    private var pendingIp: String? = null
+    private var pendingIps: List<String> = emptyList()
+    private lateinit var addr: TextView
 
     private val projLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         val d = r.data
@@ -58,6 +60,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
+        // If the app crashed last time, show the error first (send a screenshot of it)
+        val crashFile = java.io.File(filesDir, "crash.txt")
+        if (crashFile.exists()) {
+            val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 60, 24, 24); setBackgroundColor(Color.BLACK) }
+            box.addView(TextView(this).apply { text = "BOOGEYMAN crashed last time.\nSend a screenshot of this to the developer:"; setTextColor(RED); textSize = 16f })
+            box.addView(TextView(this).apply { text = crashFile.readText().take(1800); setTextColor(Color.YELLOW); textSize = 10f; setTextIsSelectable(true) })
+            box.addView(redBtn(this, "Clear and continue") { crashFile.delete(); recreate() })
+            setContentView(ScrollView(this).apply { setBackgroundColor(Color.BLACK); addView(box) })
+            return
+        }
         notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         val dp = resources.displayMetrics.density
 
@@ -79,11 +91,11 @@ class MainActivity : AppCompatActivity() {
         home = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val lp = { LinearLayout.LayoutParams(-1, (90 * dp).toInt()).apply { topMargin = (20 * dp).toInt() } }
         home.addView(redBtn(this, "▦   Show my QR\n(shares THIS phone's screen)") {
-            val ip = localIp()
-            if (ip == null) {
+            val ips = localIps()
+            if (ips.isEmpty()) {
                 Toast.makeText(this, "Connect to Wi-Fi or turn on Hotspot first", Toast.LENGTH_LONG).show()
             } else {
-                pendingIp = ip
+                pendingIps = ips
                 projLauncher.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
             }
         }, lp())
@@ -99,6 +111,8 @@ class MainActivity : AppCompatActivity() {
         shareBox.addView(status)
         qrImage = ImageView(this).apply { setBackgroundColor(Color.WHITE); setPadding(16, 16, 16, 16) }
         shareBox.addView(qrImage, LinearLayout.LayoutParams((280 * dp).toInt(), (280 * dp).toInt()).apply { topMargin = (16 * dp).toInt() })
+        addr = TextView(this).apply { setTextColor(Color.GRAY); textSize = 12f; gravity = Gravity.CENTER }
+        shareBox.addView(addr)
         touchSwitch = Switch(this).apply {
             text = "Touch control  "; setTextColor(Color.WHITE); textSize = 18f
             thumbTintList = ColorStateList.valueOf(RED)
@@ -126,7 +140,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startShare(data: Intent) {
-        val ip = pendingIp ?: localIp() ?: return
+        val ips = pendingIps.ifEmpty { localIps() }
+        if (ips.isEmpty()) return
+        val hosts = ips.joinToString(",") { "$it:${ShareService.PORT}" }
         val room = UUID.randomUUID().toString().take(8)
         ShareService.onPeer = { connected ->
             runOnUiThread {
@@ -134,9 +150,17 @@ class MainActivity : AppCompatActivity() {
                 status.text = if (connected) "Connected ✔\nTHIS phone's screen is being shared" else "Waiting for the other phone to scan..."
             }
         }
+        addr.text = hosts
+        ShareService.onInfo = { info -> runOnUiThread { addr.text = "$hosts\nserver: $info" } }
+        ShareService.onError = { msg ->
+            runOnUiThread {
+                Toast.makeText(this, "Sharing failed: $msg", Toast.LENGTH_LONG).show()
+                shareBox.visibility = View.GONE; home.visibility = View.VISIBLE
+            }
+        }
         startForegroundService(Intent(this, ShareService::class.java)
             .putExtra("data", data).putExtra("room", room))
-        qrImage.setImageBitmap(BarcodeEncoder().encodeBitmap("$ip:${ShareService.PORT}|$room", BarcodeFormat.QR_CODE, 700, 700))
+        qrImage.setImageBitmap(BarcodeEncoder().encodeBitmap("$hosts|$room", BarcodeFormat.QR_CODE, 700, 700))
         qrImage.visibility = View.VISIBLE
         status.text = "THIS phone's screen will be shared.\nScan this QR with the OTHER phone."
         home.visibility = View.GONE; shareBox.visibility = View.VISIBLE
