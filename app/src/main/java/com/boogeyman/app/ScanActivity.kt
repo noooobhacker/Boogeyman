@@ -30,7 +30,7 @@ class ScanActivity : AppCompatActivity() {
         super.onCreate(b)
         scanner = DecoratedBarcodeView(this)
         setContentView(scanner)
-        scanner.setStatusText("Scan the QR on the other phone")
+        scanner.setStatusText("Scan the QR on the phone you want to VIEW & CONTROL")
         scanner.barcodeView.decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
         scanner.decodeContinuous(object : BarcodeCallback {
             override fun barcodeResult(r: BarcodeResult) {

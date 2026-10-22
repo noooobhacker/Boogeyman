@@ -7,6 +7,8 @@ import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowManager
+import androidx.activity.OnBackPressedCallback
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
@@ -21,11 +23,18 @@ class ViewerActivity : AppCompatActivity() {
     private var dc: DataChannel? = null
     private val iceQ = IceQueue()
     private lateinit var info: TextView
+    private var vw = 0
+    private var vh = 0
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         Rtc.init(this)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Phone's own Back button = Back on the other phone (use the ✕ button to leave)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() { send(JSONObject().put("t", "nav").put("a", "back")) }
+        })
         val parts = intent.getStringExtra("qr")!!.split("|")
         val hostPort = parts[0]; val room = parts[1]
 
@@ -33,7 +42,7 @@ class ViewerActivity : AppCompatActivity() {
         renderer = SurfaceViewRenderer(this)
         holder.addView(renderer, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
 
-        info = TextView(this).apply { text = "Connecting…"; setTextColor(RED); textSize = 18f; gravity = Gravity.CENTER }
+        info = TextView(this).apply { text = "Connecting to the other phone…"; setTextColor(RED); textSize = 18f; gravity = Gravity.CENTER }
         holder.addView(info, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
         // floating control panel: dim handle at the bottom; tap to expand, tap arrow to collapse
@@ -43,10 +52,14 @@ class ViewerActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor("#CC000000")); alpha = 0.35f
         }
         val row = LinearLayout(this).apply { visibility = View.GONE }
-        listOf("◀ Back" to "back", "● Home" to "home", "▣ Recents" to "recents").forEach { (label, a) ->
-            row.addView(redBtn(this, label) { send(JSONObject().put("t", "nav").put("a", a)) },
-                LinearLayout.LayoutParams(-2, -2).apply { setMargins(8, 8, 8, 0) })
+        listOf("◀ Back" to "back", "● Home" to "home", "▣ Apps" to "recents").forEach { (label, a) ->
+            row.addView(redBtn(this, label) { send(JSONObject().put("t", "nav").put("a", a)) }.apply {
+                minWidth = 0; minimumWidth = 0; setPadding((14 * dp).toInt(), 0, (14 * dp).toInt(), 0)
+            }, LinearLayout.LayoutParams(-2, -2).apply { setMargins(6, 8, 6, 0) })
         }
+        row.addView(redBtn(this, "✕ Exit") { finish() }.apply {
+            minWidth = 0; minimumWidth = 0; setPadding((14 * dp).toInt(), 0, (14 * dp).toInt(), 0)
+        }, LinearLayout.LayoutParams(-2, -2).apply { setMargins(6, 8, 6, 0) })
         val arrow = TextView(this).apply {
             text = "▲"; textSize = 26f; setTextColor(RED); gravity = Gravity.CENTER
             setPadding((28 * dp).toInt(), 0, (28 * dp).toInt(), 0)
@@ -64,9 +77,10 @@ class ViewerActivity : AppCompatActivity() {
 
         renderer.init(Rtc.egl.eglBaseContext, object : RendererCommon.RendererEvents {
             override fun onFirstFrameRendered() { runOnUiThread { info.visibility = View.GONE } }
-            override fun onFrameResolutionChanged(w: Int, h: Int, rot: Int) { runOnUiThread { fit(w, h) } }
+            override fun onFrameResolutionChanged(w: Int, h: Int, rot: Int) { runOnUiThread { vw = w; vh = h; fit(w, h) } }
         })
         renderer.setEnableHardwareScaler(true)
+        holder.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> if (vw > 0) fit(vw, vh) }
 
         var x0 = 0f; var y0 = 0f; var t0 = 0L
         renderer.setOnTouchListener { v, e ->
@@ -91,8 +105,12 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private fun fit(w: Int, h: Int) {
-        val s = minOf(holder.width / w.toFloat(), holder.height / h.toFloat())
-        renderer.layoutParams = FrameLayout.LayoutParams((w * s).toInt(), (h * s).toInt(), Gravity.CENTER)
+        if (w <= 0 || h <= 0 || holder.width == 0 || holder.height == 0) return
+        val sc = minOf(holder.width / w.toFloat(), holder.height / h.toFloat())
+        val nw = (w * sc).toInt(); val nh = (h * sc).toInt()
+        val cur = renderer.layoutParams
+        if (cur != null && cur.width == nw && cur.height == nh) return
+        renderer.layoutParams = FrameLayout.LayoutParams(nw, nh, Gravity.CENTER)
     }
 
     private fun send(o: JSONObject) {
@@ -104,7 +122,19 @@ class ViewerActivity : AppCompatActivity() {
             "offer" -> {
                 val p = Rtc.factory.createPeerConnection(Rtc.config(), object : PcObserver() {
                     override fun onIceCandidate(c: IceCandidate?) { c?.let { sig?.send(iceMsg(it)) } }
-                    override fun onDataChannel(d: DataChannel?) { dc = d }
+                    override fun onDataChannel(d: DataChannel?) {
+                        dc = d
+                        d?.registerObserver(object : DataChannel.Observer {
+                            override fun onBufferedAmountChange(l: Long) {}
+                            override fun onStateChange() {}
+                            override fun onMessage(b: DataChannel.Buffer) {
+                                val bytes = ByteArray(b.data.remaining()); b.data.get(bytes)
+                                val m = JSONObject(String(bytes))
+                                if (m.optString("t") == "err")
+                                    runOnUiThread { Toast.makeText(this@ViewerActivity, m.optString("m"), Toast.LENGTH_SHORT).show() }
+                            }
+                        })
+                    }
                     override fun onIceConnectionChange(st: PeerConnection.IceConnectionState?) {
                         if (st == PeerConnection.IceConnectionState.FAILED || st == PeerConnection.IceConnectionState.DISCONNECTED)
                             runOnUiThread { info.visibility = View.VISIBLE; info.text = "Video link failed.\nSame Wi-Fi? Turn off router AP isolation / VPN." }

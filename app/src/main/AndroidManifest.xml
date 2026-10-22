@@ -13,7 +13,8 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <activity android:name=".ViewerActivity" android:exported="false"/>
+        <activity android:name=".ViewerActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"/>
         <activity android:name=".ScanActivity" android:exported="false"
             android:screenOrientation="portrait" android:theme="@style/Theme.AppCompat.NoActionBar"/>
         <service android:name=".ShareService" android:exported="false"

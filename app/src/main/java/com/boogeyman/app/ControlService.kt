@@ -3,11 +3,24 @@ package com.boogeyman.app
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import org.json.JSONObject
 
 class ControlService : AccessibilityService() {
-    companion object { var instance: ControlService? = null; var allowed = false }
+    companion object {
+        var instance: ControlService? = null
+        var allowed = false
+        // null = OK, otherwise the reason control cannot work right now
+        fun check(): String? = when {
+            instance == null -> "Accessibility is OFF on the other phone"
+            !allowed -> "Touch control switch is OFF on the other phone"
+            else -> null
+        }
+    }
+
+    private val main = Handler(Looper.getMainLooper())
 
     override fun onServiceConnected() { instance = this }
     override fun onUnbind(i: android.content.Intent?): Boolean { instance = null; return super.onUnbind(i) }
@@ -16,13 +29,17 @@ class ControlService : AccessibilityService() {
 
     fun handle(m: JSONObject) {
         if (!allowed) return
-        when (m.getString("t")) {
-            "g" -> gesture(m.getDouble("x1"), m.getDouble("y1"), m.getDouble("x2"), m.getDouble("y2"), m.getLong("d"))
-            "nav" -> performGlobalAction(when (m.getString("a")) {
-                "back" -> GLOBAL_ACTION_BACK
-                "home" -> GLOBAL_ACTION_HOME
-                else -> GLOBAL_ACTION_RECENTS
-            })
+        main.post {
+            try {
+                when (m.getString("t")) {
+                    "g" -> gesture(m.getDouble("x1"), m.getDouble("y1"), m.getDouble("x2"), m.getDouble("y2"), m.getLong("d"))
+                    "nav" -> performGlobalAction(when (m.getString("a")) {
+                        "back" -> GLOBAL_ACTION_BACK
+                        "home" -> GLOBAL_ACTION_HOME
+                        else -> GLOBAL_ACTION_RECENTS
+                    })
+                }
+            } catch (_: Exception) {}
         }
     }
 

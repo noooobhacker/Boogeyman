@@ -11,14 +11,18 @@ import org.java_websocket.server.WebSocketServer
 import org.json.JSONObject
 import org.webrtc.*
 import java.net.InetSocketAddress
+import java.nio.ByteBuffer
 
 // Tiny signaling server that runs on the sharing phone itself (no PC / no internet server needed)
 class LocalServer(private val room: String, private val onMsg: (JSONObject) -> Unit,
                   private val onPeer: (Boolean) -> Unit) : WebSocketServer(InetSocketAddress(ShareService.PORT)) {
     private var client: WebSocket? = null
     override fun onOpen(c: WebSocket, h: ClientHandshake) {
-        if (!h.resourceDescriptor.contains("room=$room") || client != null) { c.close(); return }
-        client = c; onPeer(true)
+        if (!h.resourceDescriptor.contains("room=$room")) { c.close(); return }
+        val old = client
+        client = c
+        old?.close()   // a new scan replaces a stale connection
+        onPeer(true)
     }
     override fun onClose(c: WebSocket, code: Int, reason: String?, remote: Boolean) {
         if (c == client) { client = null; onPeer(false) }
@@ -92,14 +96,24 @@ class ShareService : Service() {
         val p = Rtc.factory.createPeerConnection(Rtc.config(), object : PcObserver() {
             override fun onIceCandidate(c: IceCandidate?) { c?.let { server?.sendMsg(iceMsg(it)) } }
         })!!
-        p.addTrack(track, listOf("s"))
+        p.addTrack(track, listOf("s"))?.let { sender ->
+            try {
+                val prm = sender.parameters
+                prm.encodings.forEach { it.maxBitrateBps = 4_000_000; it.maxFramerate = 30 }
+                sender.setParameters(prm)
+            } catch (_: Exception) {}
+        }
         val ch = p.createDataChannel("ctl", DataChannel.Init())
         ch.registerObserver(object : DataChannel.Observer {
             override fun onBufferedAmountChange(l: Long) {}
             override fun onStateChange() {}
             override fun onMessage(b: DataChannel.Buffer) {
                 val bytes = ByteArray(b.data.remaining()); b.data.get(bytes)
-                ControlService.instance?.handle(JSONObject(String(bytes)))
+                val msg = JSONObject(String(bytes))
+                val why = ControlService.check()
+                if (why == null) ControlService.instance?.handle(msg)
+                else ch.send(DataChannel.Buffer(
+                    ByteBuffer.wrap(JSONObject().put("t", "err").put("m", why).toString().toByteArray()), false))
             }
         })
         dc = ch

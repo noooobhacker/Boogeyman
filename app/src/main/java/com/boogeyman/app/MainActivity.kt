@@ -71,9 +71,14 @@ class MainActivity : AppCompatActivity() {
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         })
 
+        root.addView(TextView(this).apply {
+            text = "Phone A: tap Show my QR (its screen gets shared)\nPhone B: tap Scan QR (watches and controls Phone A)"
+            setTextColor(Color.LTGRAY); textSize = 13f; gravity = Gravity.CENTER
+            setPadding(0, (12 * dp).toInt(), 0, 0)
+        })
         home = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val lp = { LinearLayout.LayoutParams(-1, (90 * dp).toInt()).apply { topMargin = (20 * dp).toInt() } }
-        home.addView(redBtn(this, "▦   Show my QR") {
+        home.addView(redBtn(this, "▦   Show my QR\n(shares THIS phone's screen)") {
             val ip = localIp()
             if (ip == null) {
                 Toast.makeText(this, "Connect to Wi-Fi or turn on Hotspot first", Toast.LENGTH_LONG).show()
@@ -82,7 +87,7 @@ class MainActivity : AppCompatActivity() {
                 projLauncher.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
             }
         }, lp())
-        home.addView(redBtn(this, "📷   Scan QR") {
+        home.addView(redBtn(this, "📷   Scan QR\n(view & control the OTHER phone)") {
             scanLauncher.launch(Intent(this, ScanActivity::class.java))
         }, lp())
         root.addView(home)
@@ -126,14 +131,14 @@ class MainActivity : AppCompatActivity() {
         ShareService.onPeer = { connected ->
             runOnUiThread {
                 qrImage.visibility = if (connected) View.GONE else View.VISIBLE
-                status.text = if (connected) "Connected ✔  Your screen is being shared" else "Waiting for the other phone..."
+                status.text = if (connected) "Connected ✔\nTHIS phone's screen is being shared" else "Waiting for the other phone to scan..."
             }
         }
         startForegroundService(Intent(this, ShareService::class.java)
             .putExtra("data", data).putExtra("room", room))
         qrImage.setImageBitmap(BarcodeEncoder().encodeBitmap("$ip:${ShareService.PORT}|$room", BarcodeFormat.QR_CODE, 700, 700))
         qrImage.visibility = View.VISIBLE
-        status.text = "Scan this QR from the other phone"
+        status.text = "THIS phone's screen will be shared.\nScan this QR with the OTHER phone."
         home.visibility = View.GONE; shareBox.visibility = View.VISIBLE
     }
 
