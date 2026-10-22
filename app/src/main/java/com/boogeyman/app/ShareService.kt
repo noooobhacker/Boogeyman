@@ -38,6 +38,7 @@ class ShareService : Service() {
     private var helper: SurfaceTextureHelper? = null
     private var track: VideoTrack? = null
     private var dc: DataChannel? = null
+    private val iceQ = IceQueue()
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -78,14 +79,16 @@ class ShareService : Service() {
 
     private fun onSignal(m: JSONObject) {
         when (m.getString("type")) {
-            "answer" -> pc?.setRemoteDescription(SimpleSdp(),
-                SessionDescription(SessionDescription.Type.ANSWER, m.getString("sdp")))
-            "ice" -> pc?.addIceCandidate(iceFrom(m))
+            "answer" -> pc?.setRemoteDescription(object : SimpleSdp() {
+                override fun onSetSuccess() { iceQ.flush(pc) }
+            }, SessionDescription(SessionDescription.Type.ANSWER, m.getString("sdp")))
+            "ice" -> iceQ.add(pc, iceFrom(m))
         }
     }
 
     private fun startOffer() {
         pc?.close()
+        iceQ.reset()
         val p = Rtc.factory.createPeerConnection(Rtc.config(), object : PcObserver() {
             override fun onIceCandidate(c: IceCandidate?) { c?.let { server?.sendMsg(iceMsg(it)) } }
         })!!

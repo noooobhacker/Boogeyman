@@ -8,7 +8,7 @@ android {
 }
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("org.webrtc:google-webrtc:1.0.32006")
+    implementation("io.github.webrtc-sdk:android:125.6422.07")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("org.java-websocket:Java-WebSocket:1.5.7")

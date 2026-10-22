@@ -15,8 +15,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.google.zxing.BarcodeFormat
 import com.journeyapps.barcodescanner.BarcodeEncoder
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.UUID
@@ -53,8 +51,8 @@ class MainActivity : AppCompatActivity() {
         val d = r.data
         if (r.resultCode == RESULT_OK && d != null) startShare(d)
     }
-    private val scanLauncher = registerForActivityResult(ScanContract()) { r ->
-        r.contents?.let { startActivity(Intent(this, ViewerActivity::class.java).putExtra("qr", it)) }
+    private val scanLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        r.data?.getStringExtra("qr")?.let { startActivity(Intent(this, ViewerActivity::class.java).putExtra("qr", it)) }
     }
     private val notifLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -85,10 +83,7 @@ class MainActivity : AppCompatActivity() {
             }
         }, lp())
         home.addView(redBtn(this, "📷   Scan QR") {
-            scanLauncher.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setBeepEnabled(false).setOrientationLocked(true)
-                .setCaptureActivity(PortraitCaptureActivity::class.java)
-                .setPrompt("Scan the QR on the other phone"))
+            scanLauncher.launch(Intent(this, ScanActivity::class.java))
         }, lp())
         root.addView(home)
 

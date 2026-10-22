@@ -19,6 +19,8 @@ class ViewerActivity : AppCompatActivity() {
     private var sig: Signaling? = null
     private var pc: PeerConnection? = null
     private var dc: DataChannel? = null
+    private val iceQ = IceQueue()
+    private lateinit var info: TextView
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(b: Bundle?) {
@@ -30,6 +32,9 @@ class ViewerActivity : AppCompatActivity() {
         holder = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         renderer = SurfaceViewRenderer(this)
         holder.addView(renderer, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+
+        info = TextView(this).apply { text = "Connecting…"; setTextColor(RED); textSize = 18f; gravity = Gravity.CENTER }
+        holder.addView(info, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
         // floating control panel: dim handle at the bottom; tap to expand, tap arrow to collapse
         val dp = resources.displayMetrics.density
@@ -58,7 +63,7 @@ class ViewerActivity : AppCompatActivity() {
         setContentView(holder)
 
         renderer.init(Rtc.egl.eglBaseContext, object : RendererCommon.RendererEvents {
-            override fun onFirstFrameRendered() {}
+            override fun onFirstFrameRendered() { runOnUiThread { info.visibility = View.GONE } }
             override fun onFrameResolutionChanged(w: Int, h: Int, rot: Int) { runOnUiThread { fit(w, h) } }
         })
         renderer.setEnableHardwareScaler(true)
@@ -100,12 +105,17 @@ class ViewerActivity : AppCompatActivity() {
                 val p = Rtc.factory.createPeerConnection(Rtc.config(), object : PcObserver() {
                     override fun onIceCandidate(c: IceCandidate?) { c?.let { sig?.send(iceMsg(it)) } }
                     override fun onDataChannel(d: DataChannel?) { dc = d }
+                    override fun onIceConnectionChange(st: PeerConnection.IceConnectionState?) {
+                        if (st == PeerConnection.IceConnectionState.FAILED || st == PeerConnection.IceConnectionState.DISCONNECTED)
+                            runOnUiThread { info.visibility = View.VISIBLE; info.text = "Video link failed.\nSame Wi-Fi? Turn off router AP isolation / VPN." }
+                    }
                     override fun onAddStream(s: MediaStream?) { s?.videoTracks?.firstOrNull()?.addSink(renderer) }
                     override fun onTrack(t: RtpTransceiver?) { (t?.receiver?.track() as? VideoTrack)?.addSink(renderer) }
                 })!!
                 pc = p
                 p.setRemoteDescription(object : SimpleSdp() {
                     override fun onSetSuccess() {
+                        iceQ.flush(p)
                         p.createAnswer(object : SimpleSdp() {
                             override fun onCreateSuccess(d: SessionDescription?) {
                                 p.setLocalDescription(SimpleSdp(), d)
@@ -115,7 +125,7 @@ class ViewerActivity : AppCompatActivity() {
                     }
                 }, SessionDescription(SessionDescription.Type.OFFER, m.getString("sdp")))
             }
-            "ice" -> pc?.addIceCandidate(iceFrom(m))
+            "ice" -> iceQ.add(pc, iceFrom(m))
             "peer-left" -> runOnUiThread { finish() }
         }
     }

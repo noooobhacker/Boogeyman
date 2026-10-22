@@ -45,6 +45,15 @@ open class PcObserver : PeerConnection.Observer {
     override fun onRenegotiationNeeded() {}
 }
 
+// Candidates that arrive before the remote description is applied must wait, otherwise they are dropped
+class IceQueue {
+    private val pending = mutableListOf<IceCandidate>()
+    private var ready = false
+    @Synchronized fun add(pc: PeerConnection?, c: IceCandidate) { if (ready) pc?.addIceCandidate(c) else pending.add(c) }
+    @Synchronized fun flush(pc: PeerConnection?) { ready = true; pending.forEach { pc?.addIceCandidate(it) }; pending.clear() }
+    @Synchronized fun reset() { ready = false; pending.clear() }
+}
+
 fun iceMsg(c: IceCandidate) = JSONObject().put("type", "ice")
     .put("mid", c.sdpMid).put("idx", c.sdpMLineIndex).put("cand", c.sdp)
 
